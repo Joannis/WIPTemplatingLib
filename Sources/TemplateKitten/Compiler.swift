@@ -60,31 +60,26 @@ public struct TemplateContext {
     }
 }
 
-fileprivate extension UnsafeByteBuffer {
-    mutating func parseSlice() throws -> UnsafeByteBuffer {
-        guard
-            let length = readInteger(as: UInt32.self),
-            let slice = readUnsafeSlice(length: Int(length))
-        else {
+fileprivate extension ByteBuffer {
+    @inline
+    func withSlice(run: (UnsafeRawBufferPointer) throws -> ()) throws {
+        guard let length = self.readInteger(as: UInt32.self) else {
             throw TemplateError.internalCompilerError
         }
         
-        return slice
-    }
-}
-
-extension ByteBuffer {
-    mutating func writeBytes(_ buffer: UnsafeByteBuffer) {
-        buffer.withUnsafeReadableBytes { buffer in
-            self.writeBytes(buffer)
+        let size = Int(length)
+        
+        try self.readWithUnsafeReadableBytes { buffer in
+            let buffer = UnsafeRawBufferPointer(start: buffer.baseAddress, count: size)
+            try run(buffer)
+            return size
         }
     }
-}
 
 public struct CompiledTemplate {
-    private var _template: UnsafeByteBuffer
+    private var _template: ByteBuffer
     
-    init(template: UnsafeByteBuffer) {
+    init(template: ByteBuffer) {
         self._template = template
     }
     
@@ -104,7 +99,7 @@ public struct CompiledTemplate {
         return data
     }
     
-    private static func compileNextNode(template: inout UnsafeByteBuffer, into output: inout ByteBuffer) throws {
+    private static func compileNextNode(template: inout ByteBuffer, into output: inout ByteBuffer) throws {
         while let byte = template.readInteger(as: UInt8.self) {
             guard let node = CompiledNode(rawValue: byte) else {
                 throw TemplateError.internalCompilerError
@@ -114,26 +109,32 @@ public struct CompiledTemplate {
             case .none:
                 return
             case .literal:
-                let buffer = try template.parseSlice()
-                output.writeBytes(buffer)
+                try template.withSlice { buffer in
+                    output.writeBytes(buffer)
+                }
             case .tag:
                 let offset = template.readerIndex
-                let tag = try template.parseSlice()
-                output.writeInteger(Constants.less)
-                output.writeBytes(tag)
+                try template.withSlice { tag in
+                    output.writeInteger(Constants.less)
+                    output.writeBytes(tag)
+                }
 
                 guard let modifierCount = template.readInteger(as: UInt8.self) else {
                     throw TemplateError.internalCompilerError
                 }
                 
                 for _ in 0..<modifierCount {
-                    let key = try template.parseSlice()
-                    let value = try template.parseSlice()
+                    try template.withSlice { key in
+                        output.writeBytes(key)
+                    }
                     
-                    output.writeBytes(key)
                     output.writeInteger(Constants.equal)
                     output.writeInteger(Constants.quote)
-                    output.writeBytes(value)
+                    
+                    try template.withSlice { value in
+                        output.writeBytes(value)
+                    }
+                    
                     output.writeInteger(Constants.quote)
                 }
                     
@@ -143,7 +144,12 @@ public struct CompiledTemplate {
                 
                 output.writeInteger(Constants.less)
                 output.writeInteger(Constants.forwardSlash)
-                output.writeBytes(tag)
+                let newOffset = template.readerIndex
+                template.moveReaderIndex(to: offset)
+                try template.withSlice { tag in
+                    output.writeBytes(tag)
+                }
+                template.moveReaderIndex(to: newOffset)
                 output.writeInteger(Constants.greater)
             case .list:
                 guard let nodeCount = template.readInteger(as: UInt8.self) else {
@@ -231,31 +237,13 @@ public struct TemplateCompiler {
     public static func compile<T: Template>(_ type: T.Type) -> CompiledTemplate {
         var compiler = TemplateCompiler()
         compiler.compile(TemplateNode(from: T()))
-        
-        let size = compiler.buffer.readableBytes
-        let pointer = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 1)
-        
-        compiler.buffer.withUnsafeReadableBytes { buffer in
-            _ = memcpy(pointer, buffer.baseAddress, size)
-        }
-        
-        let buffer = UnsafeByteBuffer(pointer: pointer, size: size)
-        return CompiledTemplate(template: buffer)
+        return CompiledTemplate(template: compiler.buffer)
     }
     
     public static func compile(_ root: Root) -> CompiledTemplate {
         var compiler = TemplateCompiler()
         compiler.compile(root.node)
-        
-        let size = compiler.buffer.readableBytes
-        let pointer = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 1)
-        
-        compiler.buffer.withUnsafeReadableBytes { buffer in
-            _ = memcpy(pointer, buffer.baseAddress, size)
-        }
-        
-        let buffer = UnsafeByteBuffer(pointer: pointer, size: size)
-        return CompiledTemplate(template: buffer)
+        return CompiledTemplate(template: compiler.buffer)
     }
 }
 //
