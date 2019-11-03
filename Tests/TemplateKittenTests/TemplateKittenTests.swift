@@ -27,7 +27,7 @@ final class TemplateKittenTests: XCTestCase {
             }
         }
         
-        var compiled = TemplateCompiler.compile(template)
+        var compiled = try TemplateCompiler.compile(template)
         var context = TemplateContext()
         context["title"] = .staticString("Vapor")
         var output = ByteBufferAllocator().buffer(capacity: 4_096)

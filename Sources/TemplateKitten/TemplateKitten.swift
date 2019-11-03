@@ -6,7 +6,7 @@ internal indirect enum TemplateNode: ContentRepresentable, _HTML {
     case tag(name: StaticString, content: TemplateNode, modifiers: [Modifier])
     case lazy(() -> TemplateNode)
     case literal(String)
-    case contextValue([String])
+    case contextValue(StaticString)
     
     var node: TemplateNode { self }
     var html: TemplateNode { self }

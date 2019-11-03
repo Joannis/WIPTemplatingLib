@@ -2,7 +2,7 @@ import Foundation
 import NIO
 
 enum CompiledNode: UInt8 {
-    case none = 0x00
+//    case none = 0x00
     case tag = 0x01
     case literal = 0x02
     case list = 0x03
@@ -73,10 +73,23 @@ fileprivate extension UnsafeByteBuffer {
     }
 }
 
+fileprivate extension ByteBuffer {
+    mutating func parseSlice() throws -> ByteBuffer {
+        guard
+            let length = readInteger(as: UInt32.self),
+            let slice = readSlice(length: Int(length))
+        else {
+            throw TemplateError.internalCompilerError
+        }
+        
+        return slice
+    }
+}
+
 extension ByteBuffer {
     mutating func writeBytes(_ buffer: UnsafeByteBuffer) {
-        buffer.withUnsafeReadableBytes { buffer in
-            self.writeBytes(buffer)
+        _ = buffer.withUnsafeReadableBytes { buffer in
+            _ = self.writeBytes(buffer)
         }
     }
 }
@@ -111,13 +124,12 @@ public struct CompiledTemplate {
             }
             
             switch node {
-            case .none:
-                return
+//            case .none:
+//                return
             case .literal:
                 let buffer = try template.parseSlice()
                 output.writeBytes(buffer)
             case .tag:
-                let offset = template.readerIndex
                 let tag = try template.parseSlice()
                 output.writeInteger(Constants.less)
                 output.writeBytes(tag)
@@ -154,10 +166,7 @@ public struct CompiledTemplate {
                     try compileNextNode(template: &template, into: &output)
                 }
             case .contextValue:
-                guard let pathCount = template.readInteger(as: UInt8.self) else {
-                    throw TemplateError.internalCompilerError
-                }
-                
+                _ = try template.parseSlice()
             }
         }
     }
@@ -189,10 +198,15 @@ public struct TemplateCompiler {
         buffer.writeString(string)
     }
     
+    private mutating func compileString(_ string: StaticString) {
+        buffer.writeInteger(UInt32(string.utf8CodeUnitCount))
+        buffer.writeStaticString(string)
+    }
+    
     private mutating func compile(_ node: TemplateNode) {
         switch node {
         case .none:
-        buffer.writeInteger(CompiledNode.none.rawValue)
+            return
         case .tag(let name, let content, let modifiers):
             let data = Data(bytes: name.utf8Start, count: name.utf8CodeUnitCount)
             let name = String(data: data, encoding: .utf8)!
@@ -220,37 +234,130 @@ public struct TemplateCompiler {
             compile(render())
         case .contextValue(let path):
             buffer.writeInteger(CompiledNode.contextValue.rawValue)
-            buffer.writeInteger(UInt8(path.count))
-            
-            for key in path {
-                compileString(key)
-            }
+            compileString(path)
         }
     }
     
     public static func compile<T: Template>(_ type: T.Type) -> CompiledTemplate {
         var compiler = TemplateCompiler()
-        compiler.compile(TemplateNode(from: T()))
-        
-        let size = compiler.buffer.readableBytes
-        let pointer = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 1)
-        
-        compiler.buffer.withUnsafeReadableBytes { buffer in
-            _ = memcpy(pointer, buffer.baseAddress, size)
-        }
-        
-        let buffer = UnsafeByteBuffer(pointer: pointer, size: size)
-        return CompiledTemplate(template: buffer)
+        var node = TemplateNode(from: T())
+        _ = optimize(&node)
+        compiler.compile(node)
+        return compiler.export()
     }
     
     public static func compile(_ root: Root) -> CompiledTemplate {
         var compiler = TemplateCompiler()
-        compiler.compile(root.node)
-        
-        let size = compiler.buffer.readableBytes
+        var node = root.node
+        _ = optimize(&node)
+        compiler.compile(node)
+        return compiler.export()
+    }
+    
+    private static func optimize(_ node: inout TemplateNode) -> Bool {
+        switch node {
+        case .none:
+            return true
+        case .list(let subnodes):
+            var nodes = [TemplateNode]()
+            var shouldReoptimize = false
+            var result = ""
+            
+            func flushOptimization() {
+                if result.isEmpty { return }
+                
+                nodes.append(.literal(result))
+                result = ""
+            }
+            
+            var iterator = subnodes.makeIterator()
+            
+            nextSubnode: while var subnode = iterator.next() {
+                let didOptimize = optimize(&subnode)
+                
+                switch subnode {
+                case .none:
+                    continue nextSubnode
+                case .list(let nestedList):
+                    if !didOptimize {
+                        flushOptimization()
+                    }
+                    nodes.append(contentsOf: nestedList)
+                    shouldReoptimize = true
+                case .tag(let name, var content, let modifiers):
+                    result += "<\(name)\(modifiers.string)>"
+                    
+                    let isOptimized = optimize(&content)
+                    if isOptimized, case .literal(let value) = content {
+                        result += value
+                    } else {
+                        flushOptimization()
+                        nodes.append(content)
+                    }
+                    
+                    result += "</\(name)>"
+                case .lazy(let build):
+                    var resolved = build()
+                    if !optimize(&resolved) {
+                        shouldReoptimize = true
+                    }
+                    nodes.append(resolved)
+                case .literal(let value):
+                    result += value
+                case .contextValue:
+                    assert(!didOptimize, "Optimized node cannot be a contextValue, these are not optimizable")
+                    flushOptimization()
+                    nodes.append(subnode)
+                }
+            }
+            
+            flushOptimization()
+            
+            if nodes.count > 1 {
+                if shouldReoptimize {
+                    var optimizedNode = TemplateNode.list(nodes)
+                    _ = optimize(&optimizedNode)
+                    node = optimizedNode
+                } else {
+                    node = .list(nodes)
+                }
+            } else {
+                node = nodes.first ?? .none
+            }
+            return true
+        case .tag(let name, var content, let modifiers):
+            let start = "<\(name)\(modifiers.string)>"
+            let end = "</\(name)>"
+            let isOptimized = optimize(&content)
+            
+            if isOptimized, case .literal(let value) = content {
+                node = .literal(start + value + end)
+                return true
+            } else {
+                node = .list([
+                    .literal(start),
+                    content,
+                    .literal(end)
+                ])
+                return false
+            }
+        case .lazy(let build):
+            var resolved = build()
+            let success = optimize(&resolved)
+            node = resolved
+            return success
+        case .literal:
+            return true
+        case .contextValue:
+            return false
+        }
+    }
+    
+    func export() -> CompiledTemplate {
+        let size = buffer.readableBytes
         let pointer = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 1)
         
-        compiler.buffer.withUnsafeReadableBytes { buffer in
+        buffer.withUnsafeReadableBytes { buffer in
             _ = memcpy(pointer, buffer.baseAddress, size)
         }
         
@@ -258,29 +365,35 @@ public struct TemplateCompiler {
         return CompiledTemplate(template: buffer)
     }
 }
-//
+
 //struct TemplateRenderer {
-//    static func updateString(_ string: inout String, forNode node: TemplateNode) {
+//    static func prerender(_ buffer: inout ByteBuffer, forNode node: TemplateNode) -> Bool {
 //        switch node {
 //        case .none:
-//            return
+//        return true
 //        case .tag(let name, let content, let modifiers):
 //            let data = Data(bytes: name.utf8Start, count: name.utf8CodeUnitCount)
 //            let name = String(data: data, encoding: .utf8)!
 //            let modifierString = modifiers.string
-//            string += "<\(name)\(modifierString)>"
-//            updateString(&string, forNode: content)
-//            string += "</\(name)>"
+//            buffer.writeString("<\(name)\(modifierString)>")
+//            prerender(&buffer, forNode: content)
+//            buffer.writeString("</\(name)>")
+//            return true
 //        case .literal(let literal):
-//            string += literal
+//            buffer.writeString(literal)
+//            return true
 //        case .list(let nodes):
 //            for node in nodes {
-//                updateString(&string, forNode: node)
+//                if !prerender(&buffer, forNode: node) {
+//                    return false
+//                }
 //            }
-//        case .
+//            
+//            return true
+//        case .contextValue:
+//            return false
 //        case .lazy(let render):
-//            updateString(&string, forNode: render())
+//            return prerender(&buffer, forNode: render())
 //        }
 //    }
 //}
-//
