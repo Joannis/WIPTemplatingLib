@@ -61,8 +61,7 @@ public struct TemplateContext {
 }
 
 fileprivate extension ByteBuffer {
-    @inline
-    func withSlice(run: (UnsafeRawBufferPointer) throws -> ()) throws {
+    mutating func withSlice(run: (UnsafeRawBufferPointer) throws -> ()) throws {
         guard let length = self.readInteger(as: UInt32.self) else {
             throw TemplateError.internalCompilerError
         }
@@ -75,6 +74,7 @@ fileprivate extension ByteBuffer {
             return size
         }
     }
+}
 
 public struct CompiledTemplate {
     private var _template: ByteBuffer
