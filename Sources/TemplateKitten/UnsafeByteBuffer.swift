@@ -162,7 +162,7 @@ public struct UnsafeByteBuffer {
     ///     - as: the desired `FixedWidthInteger` type (optional parameter)
     /// - returns: An integer value deserialized from this `ByteBuffer` or `nil` if there aren't enough bytes readable.
     @inlinable
-    public mutating func readInteger<T: FixedWidthInteger>(endianness: Endianness = .big, as: T.Type = T.self) -> T? {
+    public mutating func readInteger<T: FixedWidthInteger>(endianness: Endianness = .little, as: T.Type = T.self) -> T? {
         return self.getInteger(at: self.readerIndex, endianness: endianness, as: T.self).map {
             self._moveReaderIndex(forwardBy: MemoryLayout<T>.size)
             return $0
@@ -179,17 +179,13 @@ public struct UnsafeByteBuffer {
     /// - returns: An integer value deserialized from this `ByteBuffer` or `nil` if the bytes of interest are not
     ///            readable.
     @inlinable
-    public func getInteger<T: FixedWidthInteger>(at index: Int, endianness: Endianness = Endianness.big, as: T.Type = T.self) -> T? {
+    public func getInteger<T: FixedWidthInteger>(at index: Int, endianness: Endianness = .little, as: T.Type = T.self) -> T? {
         guard let range = self.rangeWithinReadableBytes(index: index, length: MemoryLayout<T>.size) else {
             return nil
         }
-        return self.withUnsafeReadableBytes { ptr in
-            var value: T = 0
-            withUnsafeMutableBytes(of: &value) { valuePtr in
-                valuePtr.copyMemory(from: UnsafeRawBufferPointer(rebasing: ptr[range]))
-            }
-            return _toEndianness(value: value, endianness: endianness)
-        }
+        
+        let value = self._storage.advanced(by: index).bindMemory(to: T.self, capacity: 1).pointee
+        return _toEndianness(value: value, endianness: endianness)
     }
 }
 

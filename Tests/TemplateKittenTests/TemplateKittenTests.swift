@@ -27,15 +27,15 @@ final class TemplateKittenTests: XCTestCase {
             }
         }
         
-        var compiled = try TemplateCompiler.compile(template)
+        var compiled = TemplateCompiler.compile(template)
         var context = TemplateContext()
         context["title"] = .staticString("Vapor")
         var output = ByteBufferAllocator().buffer(capacity: 4_096)
         output.reserveCapacity(10_000)
         measure {
-            for _ in 0..<10_000 {
+//            for _ in 0..<10_000 {
                 _ = try! CompiledTemplate.render(template: &compiled, output: &output, in: context)
-            }
+//            }
         }
     }
 

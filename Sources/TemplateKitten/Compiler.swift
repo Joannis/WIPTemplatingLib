@@ -194,12 +194,12 @@ public struct TemplateCompiler {
     }
     
     private mutating func compileString(_ string: String) {
-        buffer.writeInteger(UInt32(string.utf8.count))
+        buffer.writeInteger(UInt32(string.utf8.count), endianness: .little)
         buffer.writeString(string)
     }
     
     private mutating func compileString(_ string: StaticString) {
-        buffer.writeInteger(UInt32(string.utf8CodeUnitCount))
+        buffer.writeInteger(UInt32(string.utf8CodeUnitCount), endianness: .little)
         buffer.writeStaticString(string)
     }
     
